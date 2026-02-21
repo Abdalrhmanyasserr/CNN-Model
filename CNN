@@ -1,0 +1,123 @@
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications.resnet import preprocess_input
+import matplotlib.pyplot as plt
+
+
+IMG_SIZE = (224, 224)
+BATCH_SIZE = 32
+EPOCHS_HEAD = 5       
+EPOCHS_FINE = 5        
+
+train_dir = "dataset/train"
+val_dir   = "dataset/val"
+
+
+train_ds = tf.keras.utils.image_dataset_from_directory(
+    train_dir,
+    image_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    label_mode="binary"
+)
+
+val_ds = tf.keras.utils.image_dataset_from_directory(
+    val_dir,
+    image_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    label_mode="binary",
+    shuffle=False
+)
+
+data_augmentation = tf.keras.Sequential([
+    layers.RandomFlip("horizontal"),
+    layers.RandomRotation(0.1),
+    layers.RandomZoom(0.1),
+])
+
+AUTOTUNE = tf.data.AUTOTUNE
+train_ds = train_ds.cache().shuffle(1000).prefetch(buffer_size=AUTOTUNE)
+val_ds   = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
+
+
+base_model = ResNet50(
+    include_top=False,
+    weights="imagenet",
+    input_shape=IMG_SIZE + (3,)
+)
+base_model.trainable = False  
+
+inputs = tf.keras.Input(shape=IMG_SIZE + (3,))
+x = data_augmentation(inputs)
+x = preprocess_input(x)  # preprocessing الخاص بـ ResNet
+x = base_model(x, training=False)
+x = layers.GlobalAveragePooling2D()(x)
+x = layers.Dropout(0.3)(x)
+outputs = layers.Dense(1, activation="sigmoid")(x)  # binary
+model = models.Model(inputs, outputs)
+
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+    loss="binary_crossentropy",
+    metrics=["accuracy"]
+)
+
+model.summary()
+
+
+history_head = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=EPOCHS_HEAD
+)
+
+# =========================
+# 5) Fine-Tuning (فك جزء من الطبقات)
+# =========================
+base_model.trainable = True
+
+# نفك آخر N طبقات فقط (مثلاً آخر 30 طبقة)
+fine_tune_at = len(base_model.layers) - 30
+for layer in base_model.layers[:fine_tune_at]:
+    layer.trainable = False
+
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+    loss="binary_crossentropy",
+    metrics=["accuracy"]
+)
+
+history_fine = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=EPOCHS_FINE
+)
+
+
+def plot_history(h1, h2):
+    acc = h1.history["accuracy"] + h2.history["accuracy"]
+    val_acc = h1.history["val_accuracy"] + h2.history["val_accuracy"]
+    loss = h1.history["loss"] + h2.history["loss"]
+    val_loss = h1.history["val_loss"] + h2.history["val_loss"]
+
+    plt.figure(figsize=(12,5))
+    plt.subplot(1,2,1)
+    plt.plot(acc, label="train acc")
+    plt.plot(val_acc, label="val acc")
+    plt.legend()
+    plt.title("Accuracy")
+
+    plt.subplot(1,2,2)
+    plt.plot(loss, label="train loss")
+    plt.plot(val_loss, label="val loss")
+    plt.legend()
+    plt.title("Loss")
+    plt.show()
+
+plot_history(history_head, history_fine)
+
+# =========================
+# 7) حفظ الموديل
+# =========================
+model.save("cats_vs_dogs_resnet50_finetuned.h5")
+print("Saved: cats_vs_dogs_resnet50_finetuned.h5")
